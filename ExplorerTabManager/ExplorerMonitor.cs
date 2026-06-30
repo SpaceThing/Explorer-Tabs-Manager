@@ -62,6 +62,13 @@ namespace ExplorerTabManager
         // This prevents false triggers caused by slow COM initialization at startup.
         private const int StartupGracePeriodSeconds = 8;
 
+        // If explorer.exe started within this many minutes, we treat it as a fresh system
+        // boot (reboot / shutdown / power cut) and auto-restore saved tabs on startup.
+        private const int StartupRestoreWindowMinutes = 10;
+
+        // Ensures the startup-boot restore fires at most once per ETM session.
+        private bool _startupRestoreTriggered = false;
+
         public ExplorerMonitor(SettingsManager settingsManager)
         {
             _settingsManager = settingsManager ?? throw new ArgumentNullException(nameof(settingsManager));
@@ -75,6 +82,24 @@ namespace ExplorerTabManager
 
             InitializeAutoSave();
             InitializeExplorerMonitoring();
+
+            // Save tabs when Windows is shutting down / logging off / restarting. This gives
+            // us a final chance to capture the latest state before the process is killed.
+            // (A hard power cut obviously skips this — the crash-safe atomic writes handle that.)
+            Microsoft.Win32.SystemEvents.SessionEnding += OnSessionEnding;
+        }
+
+        private void OnSessionEnding(object sender, Microsoft.Win32.SessionEndingEventArgs e)
+        {
+            try
+            {
+                SimpleLogger.Log($"SessionEnding ({e.Reason}) — forcing final save");
+                SaveCurrentTabs();
+            }
+            catch (Exception ex)
+            {
+                SimpleLogger.Log($"SessionEnding save error: {ex.Message}");
+            }
         }
 
         private void InitializeAutoSave()
@@ -112,16 +137,31 @@ namespace ExplorerTabManager
                 if (_lastExplorerWindowCount == -1)
                 {
                     _lastExplorerWindowCount = currentCount;
+
+                    // Startup-boot restore: Explorer is already open because the system just
+                    // booted (reboot, shutdown, or power cut). The normal 0→1+ trigger never
+                    // fires in this case, so we check the explorer.exe process age instead.
+                    if (!_startupRestoreTriggered
+                        && currentCount > 0
+                        && _settingsManager.Settings.AutoRestoreOnStartup
+                        && SystemJustBooted())
+                    {
+                        _startupRestoreTriggered = true;
+                        SimpleLogger.Log("Fresh boot detected — triggering startup restore...");
+                        Task.Delay(1500).ContinueWith(_ => RestoreTabs());
+                    }
+
                     return;
                 }
 
-                // Explorer was closed and has just been reopened
+                // Explorer was closed and has just been reopened (while ETM was already running)
                 if (_lastExplorerWindowCount == 0 && currentCount > 0)
                 {
                     SimpleLogger.Log($"Explorer reopened (was {_lastExplorerWindowCount}, now {currentCount})");
 
                     if (_settingsManager.Settings.AutoRestoreOnStartup)
                     {
+                        _startupRestoreTriggered = true; // prevent double-restore if timer races
                         SimpleLogger.Log("Triggering auto-restore...");
                         Task.Delay(1500).ContinueWith(_ => RestoreTabs());
                     }
@@ -279,40 +319,96 @@ namespace ExplorerTabManager
             return tabState;
         }
 
+        /// <summary>
+        /// Crash-safe session save. Survives power cuts by:
+        ///  1. Writing to a .tmp file with FileStream.Flush(true) — forces the bytes to the
+        ///     physical disk, bypassing the OS write-back cache that a power cut would lose.
+        ///  2. Using File.Replace for an atomic swap that preserves the previous version
+        ///     as a .bak. If power cuts mid-swap, either the old main or the .bak survives.
+        /// </summary>
         private void SaveSession(TabState state)
         {
+            var tmp = _sessionFilePath + ".tmp";
+            var bak = _sessionFilePath + ".bak";
+
             try
             {
-                var tmp = _sessionFilePath + ".tmp";
                 var json = JsonConvert.SerializeObject(state, Formatting.Indented);
-                File.WriteAllText(tmp, json, Encoding.UTF8);
-                File.Copy(tmp, _sessionFilePath, true);
-                File.Delete(tmp);
+
+                // Refuse to overwrite a good file with garbage
+                if (string.IsNullOrWhiteSpace(json) || json.Length < 2)
+                {
+                    SimpleLogger.Log("Refusing to save — serialized state was empty");
+                    return;
+                }
+
+                // Write to tmp with forced physical-disk flush
+                using (var fs = new FileStream(tmp, FileMode.Create, FileAccess.Write, FileShare.None))
+                using (var sw = new StreamWriter(fs, new UTF8Encoding(false)))
+                {
+                    sw.Write(json);
+                    sw.Flush();
+                    fs.Flush(true); // true = flush to physical disk, not just OS cache
+                }
+
+                // Atomic swap, keeping previous version as .bak
+                if (File.Exists(_sessionFilePath))
+                {
+                    // File.Replace is atomic on NTFS and moves the current file to .bak
+                    File.Replace(tmp, _sessionFilePath, bak, ignoreMetadataErrors: true);
+                }
+                else
+                {
+                    File.Move(tmp, _sessionFilePath);
+                }
             }
             catch (Exception ex)
             {
                 SimpleLogger.Log($"Error saving session: {ex.Message}");
+                // Best-effort cleanup of stray tmp
+                try { if (File.Exists(tmp)) File.Delete(tmp); } catch { }
             }
         }
 
+        /// <summary>
+        /// Loads the saved session, falling back to the .bak file if the main file is
+        /// missing, empty, or corrupted (e.g. truncated by a power cut between write and flush).
+        /// </summary>
         private TabState LoadSession()
         {
-            if (!File.Exists(_sessionFilePath))
+            var main = TryLoadSessionFile(_sessionFilePath);
+            if (main != null && main.Windows != null && main.Windows.Count > 0)
+                return main;
+
+            var bak = TryLoadSessionFile(_sessionFilePath + ".bak");
+            if (bak != null && bak.Windows != null && bak.Windows.Count > 0)
             {
-                SimpleLogger.Log("No saved session found");
-                return null;
+                SimpleLogger.Log("Main tabs.json was empty/corrupted — recovered from tabs.json.bak");
+                return bak;
             }
 
+            // Nothing usable in either file
+            if (main == null && bak == null)
+                SimpleLogger.Log("No saved session found");
+            else
+                SimpleLogger.Log("Both tabs.json and tabs.json.bak have no windows");
+            return main; // may be null or an empty state; callers already handle both
+        }
+
+        private TabState TryLoadSessionFile(string path)
+        {
+            if (!File.Exists(path)) return null;
             try
             {
-                var json = File.ReadAllText(_sessionFilePath, Encoding.UTF8);
+                var json = File.ReadAllText(path, Encoding.UTF8);
+                if (string.IsNullOrWhiteSpace(json)) return null;
                 var state = JsonConvert.DeserializeObject<TabState>(json);
-                SimpleLogger.Log($"Loaded session: {state?.Windows?.Count ?? 0} window(s), saved {state?.SavedAt}");
+                SimpleLogger.Log($"Loaded {Path.GetFileName(path)}: {state?.Windows?.Count ?? 0} window(s), saved {state?.SavedAt}");
                 return state;
             }
             catch (Exception ex)
             {
-                SimpleLogger.Log($"Error loading session: {ex.Message}");
+                SimpleLogger.Log($"Error loading {Path.GetFileName(path)}: {ex.Message}");
                 return null;
             }
         }
@@ -600,8 +696,55 @@ namespace ExplorerTabManager
             }
         }
 
+        /// <summary>
+        /// Returns true if the OS itself booted recently (within StartupRestoreWindowMinutes).
+        /// This is the primary signal for "fresh boot after shutdown / reboot / power cut" and
+        /// is much more reliable than checking explorer.exe's process start time, which can
+        /// change mid-session (user kills & restarts Explorer) or fail with access denied.
+        /// Falls back to explorer.exe age if system uptime is somehow unavailable.
+        /// </summary>
+        private bool SystemJustBooted()
+        {
+            try
+            {
+                var uptimeMinutes = Environment.TickCount64 / 1000.0 / 60.0;
+                if (uptimeMinutes < StartupRestoreWindowMinutes)
+                {
+                    SimpleLogger.Log($"System uptime {uptimeMinutes:F1}min — treating as fresh boot");
+                    return true;
+                }
+                SimpleLogger.Log($"System uptime {uptimeMinutes:F1}min — not a fresh boot");
+            }
+            catch (Exception ex)
+            {
+                SimpleLogger.Log($"SystemJustBooted check error: {ex.Message}");
+            }
+
+            // Fallback: check explorer.exe process age
+            try
+            {
+                var processes = Process.GetProcessesByName("explorer");
+                foreach (var p in processes)
+                {
+                    try
+                    {
+                        if ((DateTime.Now - p.StartTime).TotalMinutes < StartupRestoreWindowMinutes)
+                        {
+                            SimpleLogger.Log($"Explorer started {(DateTime.Now - p.StartTime).TotalSeconds:F0}s ago — treating as fresh boot");
+                            return true;
+                        }
+                    }
+                    catch { /* StartTime can throw on access-denied; skip that process */ }
+                }
+            }
+            catch { }
+
+            return false;
+        }
+
         public void Dispose()
         {
+            try { Microsoft.Win32.SystemEvents.SessionEnding -= OnSessionEnding; } catch { }
             _autoSaveTimer?.Stop();
             _autoSaveTimer?.Dispose();
             _explorerMonitorTimer?.Stop();

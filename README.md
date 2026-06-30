@@ -1,84 +1,77 @@
-<div align="center">
+# Explorer Tab Manager
 
-<img src="ExplorerTabManager/icons/Explorer Tabs Manager.png" width="80" alt="Explorer Tabs Manager icon">
+A lightweight system tray application for Windows 11 that provides persistent tab management for File Explorer.
 
-# Explorer Tabs Manager
+## Features
 
-**Automatically saves and restores your Windows 11 File Explorer tabs.**
-Runs silently in the system tray. Never lose your workspace again.
+- 🔄 **Auto-Save & Restore**: Automatically save your Explorer tabs and restore them when you reopen Explorer
+- ⚡ **Quick Access**: System tray icon for easy access to save/restore functions
+- ⌨️ **Hotkeys**: Customizable keyboard shortcuts for saving and restoring tabs
+- ⚙️ **Configurable**: Set default tab locations, auto-save intervals, and more
+- 🚀 **Lightweight**: Minimal resource usage, runs silently in the background
 
-[![Platform](https://img.shields.io/badge/platform-Windows%2011-0078D4?style=flat-square&logo=windows)](https://www.microsoft.com/windows/windows-11)
-[![.NET](https://img.shields.io/badge/.NET-8.0-512BD4?style=flat-square&logo=dotnet)](https://dotnet.microsoft.com/download/dotnet/8.0)
-[![License](https://img.shields.io/badge/license-Freeware-00b894?style=flat-square)](#license)
+## Why This Project?
 
-<br>
+Windows 11 introduced native tabs for File Explorer, but lacks the ability to:
+- Restore tabs after accidentally closing Explorer
+- Set a custom default location for new tabs
+- Persist tabs between sessions (without logging out)
 
-<a href="https://suzagear.com/tabs">
-  <img src="https://img.shields.io/badge/⬇%20%20Get%20the%20One--Click%20Installer-suzagear.com%2Ftabs-00b894?style=for-the-badge" alt="Get the One-Click Installer">
-</a>
+This tool fills that gap, similar to how QTTabBar worked on Windows 10.
 
-<br><br>
+## Installation
 
-</div>
+1. Download the latest release from the [Releases](https://github.com/yourusername/ExplorerTabManager/releases) page
+2. Extract and run `ExplorerTabManager.exe`
+3. The app will appear in your system tray
+4. Right-click the tray icon to access settings
 
----
+## Usage
 
-## What it does
+### System Tray Menu
+- **Save Tabs**: Manually save all current Explorer tabs
+- **Restore Tabs**: Restore previously saved tabs
+- **Settings**: Configure the application
+- **Exit**: Close the application
 
-- Saves all open File Explorer tabs to disk every few seconds
-- Detects when Explorer is reopened and restores all tabs automatically
-- Sits in the system tray — right-click to save, restore, or open settings
-- Double-click the tray icon to open Settings
+### Settings
+- **Default Tab Location**: Set where new tabs should open
+- **Auto-Save**: Enable automatic saving at specified intervals
+- **Auto-Restore**: Automatically restore tabs when the app starts
+- **Start with Windows**: Launch the app on system startup
+- **Hotkeys**: Customize keyboard shortcuts (coming soon)
 
----
+## Building from Source
 
-## Requirements
+### Prerequisites
+- .NET 8.0 SDK or later
+- Visual Studio 2022 (or VS Code with C# extension)
 
-- Windows 11 22H2 or later (Build 22621+) — tabs are a Windows 11 feature
-- [.NET 8 Runtime](https://dotnet.microsoft.com/download/dotnet/8.0) (Desktop Runtime)
-
----
-
-## Build from source
-
+### Build Steps
 ```bash
-# 1. Clone the repo
-git clone https://github.com/Umair-Fareed/Explorer-Tabs-Manager.git
-cd Explorer-Tabs-Manager
-
-# 2. Restore & build
-dotnet build ExplorerTabManager/ExplorerTabManager.csproj -c Release
-
-# 3. Run
-dotnet run --project ExplorerTabManager/ExplorerTabManager.csproj
+git clone https://github.com/yourusername/ExplorerTabManager.git
+cd ExplorerTabManager
+dotnet build
+dotnet run --project ExplorerTabManager
 ```
 
-Or open `ExplorerTabManager.sln` in **Visual Studio 2022** and press `F5`.
+## Roadmap
 
-The app starts in the system tray. No window appears on launch — look for the icon in the notification area.
+- [ ] Global hotkey support
+- [ ] Multiple tab profile management
+- [ ] Custom new tab button behavior
+- [ ] Tab grouping and organization
+- [ ] Import/export tab configurations
+- [ ] Better Windows 11 native tab integration
 
----
+## Contributing
 
-## Want the one-click installer instead?
-
-No .NET knowledge required. The installer sets everything up automatically, including autostart on Windows login.
-
-<div align="center">
-<br>
-
-<a href="https://suzagear.com/tabs">
-  <img src="https://img.shields.io/badge/⬇%20%20Download%20Installer-suzagear.com%2Ftabs-0078D4?style=for-the-badge&logo=windows&logoColor=white" alt="Download Installer">
-</a>
-
-<br><br>
-</div>
-
----
+Contributions are welcome! Please feel free to submit a Pull Request.
 
 ## License
 
-Source code is free to use and modify for personal use.
-You may not sell or redistribute this software.
-See [LICENSE](LICENSE) for full terms.
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
-© Umair Fareed / SUZA
+## Acknowledgments
+
+Inspired by QTTabBar and the need for better tab management in Windows 11 File Explorer.
