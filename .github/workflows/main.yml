@@ -1,0 +1,243 @@
+name: Build and Release
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  DOTNET_CLI_TELEMETRY_OPTOUT: 1
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: 1
+  PROJECT_PATH: ExplorerTabManager/ExplorerTabManager.csproj
+  APP_NAME: Explorer Tabs Manager
+  EXE_NAME: ExplorerTabsManager
+  TARGET_FRAMEWORK: net8.0-windows
+  RUNTIME_ID: win-x64
+
+jobs:
+  build-release:
+    runs-on: windows-latest
+
+    steps:
+      # Checkout
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # .NET SDK
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      # Version: yyyy.MM.dd+shortSha
+      - name: Generate version
+        id: version
+        shell: pwsh
+        run: |
+          $dateVersion = (Get-Date).ToUniversalTime().ToString("yyyy.MM.dd")
+          $shortSha = git rev-parse --short=7 HEAD
+          $version = "$dateVersion+$shortSha"
+
+          "date_version=$dateVersion" >> $env:GITHUB_OUTPUT
+          "short_sha=$shortSha" >> $env:GITHUB_OUTPUT
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+          Write-Host "Version: $version"
+
+      # Restore
+      - name: Restore NuGet packages
+        shell: pwsh
+        run: |
+          dotnet restore $env:PROJECT_PATH `
+            -p:Configuration=Release `
+            -p:TargetFramework=$env:TARGET_FRAMEWORK `
+            -p:RuntimeIdentifier=$env:RUNTIME_ID `
+            -p:SelfContained=false `
+            -p:PublishSelfContained=false `
+            -p:PublishSingleFile=true
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "NuGet restore failed."
+          }
+
+      # Publish single-file Windows executable
+      - name: Publish Windows app
+        shell: pwsh
+        env:
+          DATE_VERSION: ${{ steps.version.outputs.date_version }}
+          SHORT_SHA: ${{ steps.version.outputs.short_sha }}
+        run: |
+          $publishDir = Join-Path $env:RUNNER_TEMP "publish"
+
+          dotnet publish $env:PROJECT_PATH `
+            -c Release `
+            -f $env:TARGET_FRAMEWORK `
+            -r $env:RUNTIME_ID `
+            --no-restore `
+            --self-contained false `
+            -o $publishDir `
+            -p:PublishSelfContained=false `
+            -p:PublishSingleFile=true `
+            -p:IncludeNativeLibrariesForSelfExtract=true `
+            -p:UseAppHost=true `
+            -p:DebugType=None `
+            -p:DebugSymbols=false `
+            -p:Version="$env:DATE_VERSION" `
+            -p:SourceRevisionId="$env:SHORT_SHA"
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Application publish failed."
+          }
+
+      # Validate and prepare portable EXE
+      - name: Prepare portable executable
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          $publishDir = Join-Path $env:RUNNER_TEMP "publish"
+          $releaseDir = Join-Path $env:RUNNER_TEMP "release"
+
+          New-Item -ItemType Directory -Path $releaseDir -Force | Out-Null
+
+          $sourceExe = Join-Path $publishDir "$env:EXE_NAME.exe"
+          $targetExe = Join-Path $releaseDir "$env:EXE_NAME-$env:VERSION.exe"
+
+          if (-not (Test-Path $sourceExe -PathType Leaf)) {
+            throw "Executable not found: $sourceExe"
+          }
+
+          $extraFiles = @(
+            Get-ChildItem $publishDir -Recurse -File |
+              Where-Object { $_.FullName -ne $sourceExe }
+          )
+
+          if ($extraFiles.Count -gt 0) {
+            $extraFiles | Select-Object FullName | Format-Table
+            throw "Publish output contains additional files."
+          }
+
+          Copy-Item $sourceExe $targetExe -Force
+
+          Write-Host "Portable EXE: $targetExe"
+
+      # Inno Setup
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          choco install innosetup -y --no-progress
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Inno Setup installation failed."
+          }
+
+      # Generate installer configuration
+      - name: Create installer script
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          $publishDir = Join-Path $env:RUNNER_TEMP "publish"
+          $releaseDir = Join-Path $env:RUNNER_TEMP "release"
+          $scriptPath = Join-Path $env:RUNNER_TEMP "installer.iss"
+
+          $appName = $env:APP_NAME
+          $exeName = $env:EXE_NAME
+          $version = $env:VERSION
+
+          @"
+          [Setup]
+          AppId=$appName
+          AppName=$appName
+          AppVersion=$version
+          AppVerName=$appName
+          UninstallDisplayName=$appName
+          DefaultDirName={autopf}\$appName
+          DefaultGroupName=$appName
+          OutputDir=$releaseDir
+          OutputBaseFilename=$exeName-$version-installer
+          Compression=lzma
+          SolidCompression=yes
+          WizardStyle=modern
+          UninstallDisplayIcon={app}\$exeName.exe
+          ArchitecturesAllowed=x64compatible
+          ArchitecturesInstallIn64BitMode=x64compatible
+
+          [Files]
+          Source: "$publishDir\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs
+
+          [Icons]
+          Name: "{group}\$appName"; Filename: "{app}\$exeName.exe"
+
+          [Run]
+          Filename: "{app}\$exeName.exe"; Description: "Launch $appName"; Flags: nowait postinstall skipifsilent
+          "@ | Set-Content -Path $scriptPath -Encoding utf8
+
+      # Compile installer
+      - name: Build installer EXE
+        shell: pwsh
+        run: |
+          $compiler = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          $scriptPath = Join-Path $env:RUNNER_TEMP "installer.iss"
+
+          if (-not (Test-Path $compiler)) {
+            throw "Inno Setup compiler not found: $compiler"
+          }
+
+          & $compiler $scriptPath
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Inno Setup compilation failed."
+          }
+
+      # Verify release outputs
+      - name: Verify release files
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          $releaseDir = Join-Path $env:RUNNER_TEMP "release"
+
+          $files = @(
+            "$env:EXE_NAME-$env:VERSION.exe",
+            "$env:EXE_NAME-$env:VERSION-installer.exe"
+          )
+
+          foreach ($file in $files) {
+            $path = Join-Path $releaseDir $file
+
+            if (-not (Test-Path $path -PathType Leaf)) {
+              throw "Release file missing: $path"
+            }
+
+            Get-Item $path |
+              Select-Object Name, Length |
+              Format-Table
+          }
+
+      # Upload artifacts
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ExplorerTabsManager-${{ steps.version.outputs.version }}
+          if-no-files-found: error
+          path: |
+            ${{ runner.temp }}/release/*.exe
+
+      # Publish GitHub Release
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.version }}
+          name: ${{ steps.version.outputs.version }}
+          target_commitish: ${{ github.sha }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            ${{ runner.temp }}/release/*.exe
